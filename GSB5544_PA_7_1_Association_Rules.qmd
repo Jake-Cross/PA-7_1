@@ -1,0 +1,362 @@
+---
+format:
+  html:
+    embed-resources: true
+jupyter: python3
+---
+
+
+In the reading you analyzed transactions from a bakery. In this activity you will carry out a very similar analysis for purchases from a grocery store.
+
+
+```{python}
+import pandas as pd
+
+from plotnine import *
+
+from mlxtend.frequent_patterns import apriori, association_rules
+
+# to stop an annoying warning
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="jupyter_client")
+```
+
+## Groceries data set
+
+- One month (30 days) of real point-of-sale transactions from a grocery store.
+- 9,835 transactions (baskets).
+- 169 product categories, such as whole milk, yogurt, bottled beer, etc.
+- Source: the data set `Groceries` in the R package `arules`, provided by Hahsler, Hornik, and Reutterer. The copy we use is a plain-text version hosted on GitHub.
+
+
+The file format is different from the bakery file. The bakery file had one row per item bought. This file has **one line per transaction**, and each line is a comma-separated list of the items in that basket. Different baskets have different numbers of items.
+
+The next cell reads each line into a single text column. (Normal CSV reading expects every row to have the same number of columns, so we read each line as one string, using a separator `"|"` that never occurs in the file.)
+
+```{python}
+import csv
+
+raw = pd.read_csv(
+    "https://raw.githubusercontent.com/stedy/Machine-Learning-with-R-datasets/master/groceries.csv",
+    header=None,             # the file has no header row: line 1 is already a transaction
+    names=["basket"],        # name the one column we create
+    sep="|",                 # "|" never appears in this file, so each whole line lands in one column
+    quoting=csv.QUOTE_NONE,  # treat any quote characters as ordinary text
+)
+```
+
+```{python}
+raw
+```
+
+We'll start with the data in long format like in the reading.
+
+- Make a column `basket_id` from the row number (`raw.index`).
+- Split the text in `raw["basket"]` at the commas, using `.str.split(",")`. This produces a *list* of items in each row.
+- Use `.explode(...)` on the column of lists to get one row per item.
+- Keep only `basket_id` and `item`, and use `.reset_index(drop=True)`.
+- Trim spaces
+
+```{python}
+long = (
+    raw
+    .assign(basket_id=raw.index)                    # use the row number as the basket ID
+    .assign(item=raw["basket"].str.split(","))      # "milk,bread" becomes ["milk", "bread"]
+    .explode("item")                                # one row per (basket, item)
+    [["basket_id", "item"]]                         # keep only the two columns we need
+    .reset_index(drop=True)                         # renumber the rows 0, 1, 2, ...
+)
+
+long["item"] = long["item"].str.strip()             # remove stray leading/trailing spaces
+
+long
+```
+
+1. Build the transaction-by-item table `basket`. There should be one row per basket, one column per item, with `True` if the item is in the basket and `False` otherwise.
+
+```{python}
+basket = pd.crosstab(
+    long["basket_id"],
+    long["item"]
+) > 0
+
+basket
+```
+
+2.  Compute the size (number of items) of each basket and store it in `basket_sizes`.
+
+```{python}
+basket_sizes = basket.sum(axis=1)
+
+basket_sizes
+```
+
+3. Summarize the distribution of the number of items.
+
+```{python}
+basket_sizes.describe()
+```
+
+4. Compute the support of every item, sorted from largest to smallest, and store it in `item_support`. Then make a horizontal bar chart of the 15 most popular items.
+
+```{python}
+item_support = basket.mean().sort_values(ascending=False)
+
+item_support
+```
+
+```{python}
+support_df = item_support.head(15).reset_index()
+support_df.columns = ["item", "support"]
+
+support_df["item"] = pd.Categorical(
+    support_df["item"],
+    categories=support_df["item"][::-1]
+)
+```
+
+```{python}
+(
+    ggplot(support_df, aes(x="item", y="support"))
+    + geom_col()
+    + coord_flip()
+    + labs(
+        title="15 Most Popular Grocery Items",
+        x="",
+        y="Support"
+    )
+)
+```
+
+5. Consider the basket sizes and the item supports. Which item is most popular, and in what percentage of baskets does it appear? Which items are most common? What does this suggest about the "popular items co-occur just by chance" problem discussed in the reading?
+
+Whole milk is the most popular item and appears in about 25.6% of baskets. Other vegetables, rolls/buns, soda, and yogurt are also among the most common items. Since baskets contain about 4.4 items on average and some items are already very popular, popular items can appear together often just by chance. This means that seeing two items together does not necessarily mean they have a strong association, so we need measures like lift to account for how common the items already are.
+
+6. Consider the rule **{yogurt} → {whole milk}**. Compute and interpret the confidence of this rule.
+
+```{python}
+s_yogurt = basket["yogurt"].mean()
+s_whole_milk = basket["whole milk"].mean()
+s_both = basket[["yogurt", "whole milk"]].all(axis=1).mean()
+
+confidence = s_both / s_yogurt
+print(confidence)
+```
+
+About 40.2% of baskets that contain yogurt also contain whole milk.
+
+
+7. Compute and interpret the **lift** of {yogurt} → {whole milk}.
+
+```{python}
+lift = s_both / (s_yogurt * s_whole_milk)
+print(lift)
+```
+
+The lift is about 1.57, meaning yogurt and whole milk occur together about 1.57 times as often as we would expect if their purchases were independent. This suggests a positive association between yogurt and whole milk.
+
+8. Now compute and interpret the confidence and lift for the rule {whole milk} → {yogurt}.
+
+```{python}
+confidence_reverse = s_both / s_whole_milk
+lift_reverse = s_both / (s_whole_milk * s_yogurt)
+
+print(confidence_reverse)
+print(lift_reverse)
+```
+
+The confidence is about 0.219, meaning about 21.9% of baskets that contain whole milk also contain yogurt. The lift is about 1.57, meaning whole milk and yogurt occur together about 1.57 times as often as expected by chance. The confidence changes when the rule is reversed, but the lift stays the same.
+
+9. Write two functions.
+
+- `support(items, onehot)`: returns the share of baskets that contain **all** of the items in the list `items`.
+- `rule_metrics(antecedent, consequent, onehot)`: returns a Pandas Series with the `support`, `confidence`, and `lift` of the rule `antecedent -> consequent`. Both `antecedent` and `consequent` are *lists* of items.
+
+Test the functions on `["yogurt"]` → `["whole milk"]`. The values should match the ones you computed earlier.
+
+```{python}
+def support(items, onehot):
+    return onehot[items].all(axis=1).mean()
+
+
+def rule_metrics(antecedent, consequent, onehot):
+    support_antecedent = support(antecedent, onehot)
+    support_consequent = support(consequent, onehot)
+    support_both = support(antecedent + consequent, onehot)
+    
+    confidence = support_both / support_antecedent
+    lift = support_both / (support_antecedent * support_consequent)
+    
+    return pd.Series({
+        "support": support_both,
+        "confidence": confidence,
+        "lift": lift
+    })
+```
+
+```{python}
+rule_metrics(["yogurt"], ["whole milk"], basket)
+```
+
+10. Whole milk is in about a quarter of all baskets. Consider the rules `{X} → {whole milk}` for the five antecedents `X` in the next cell. Before running anything, predict: for which of these will the lift be **above 1**? For which might the confidence look decent but the lift be **close to or below 1**? Just think about this before proceeding.
+
+```{python}
+antecedents = pd.Series(["yogurt", "rolls/buns", "bottled water", "soda", "other vegetables"])
+```
+
+I would predict yogurt, other vegetables, and rolls/buns to have lift above 1 with whole milk because they seem like items that would commonly be purchased together. Bottled water and soda may still have decent confidence because whole milk is already in about a quarter of all baskets, but their lift could be closer to 1.
+
+11. Compute the support, confidence, and lift of `{X} → {whole milk}` for each of the five antecedents above, and display the results sorted by lift (largest first). Compare to your predictions. Hint: Use `apply` with `lambda` on the Series of antecedents.
+
+```{python}
+results = antecedents.apply(
+    lambda x: rule_metrics([x], ["whole milk"], basket)
+)
+
+results.insert(0, "antecedent", antecedents)
+
+results = results.sort_values("lift", ascending=False)
+
+results
+```
+
+My prediction was mostly correct. Yogurt, other vegetables, rolls/buns, and bottled water all had lift above 1, meaning they occur with whole milk more often than expected by chance. Soda was different, with a lift of about 0.90, so even though its confidence was about 23%, it does not have a positive association with whole milk.
+
+12. Run `apriori` on `basket` with `min_support=0.01` and store the result in `frequent_itemsets`. Then add a column `n_items` giving the number of items in each itemset.
+
+```{python}
+frequent_itemsets = apriori(
+    basket,
+    min_support=0.01,
+    use_colnames=True
+)
+
+frequent_itemsets["n_items"] = frequent_itemsets["itemsets"].apply(len)
+
+frequent_itemsets
+```
+
+13. Generate the rules with `make_rules`, keeping rules with confidence of at least 0.20. Store them in `rules` and print how many there are.
+
+```{python}
+def make_rules(frequent_itemsets, min_confidence):
+    return association_rules(
+        frequent_itemsets,
+        metric="confidence",
+        min_threshold=min_confidence
+    )
+
+rules = make_rules(frequent_itemsets, 0.20)
+
+print(len(rules), "rules")
+```
+
+14. Make the rules easier to read. Create a copy `rules_display` of `rules` and add three columns:
+
+- `antecedent`: the antecedent items as text, e.g. `"tropical fruit, yogurt"`
+- `consequent`: the consequent items as text
+- `transactions`: the number of baskets that contain the whole rule (support times the number of baskets, rounded to an integer)
+
+Then display the columns `antecedent`, `consequent`, `support`, `confidence`, `lift`, `transactions` for the first 8 rules.
+
+```{python}
+rules_display = rules.copy()
+
+rules_display["antecedent"] = rules_display["antecedents"].apply(
+    lambda s: ", ".join(sorted(s))
+)
+
+rules_display["consequent"] = rules_display["consequents"].apply(
+    lambda s: ", ".join(sorted(s))
+)
+
+rules_display["transactions"] = (
+    rules_display["support"] * len(basket)
+).round().astype(int)
+
+rules_display[
+    ["antecedent", "consequent", "support",
+     "confidence", "lift", "transactions"]
+].head(8)
+```
+
+15. Show the 10 rules with the highest **confidence**. What do the highest-confidence rules have in common? Why is confidence alone a poor guide here?
+
+```{python}
+rules_display[
+    ["antecedent", "consequent", "support",
+     "confidence", "lift", "transactions"]
+].sort_values(
+    "confidence",
+    ascending=False
+).head(10)
+```
+
+Most of the highest-confidence rules have whole milk as the consequent, with some also predicting other vegetables. These are already very popular items, so confidence can be high partly because the consequent is common overall. Confidence alone is therefore a poor guide because it does not account for how often the consequent would appear anyway.
+
+16. Show the 10 rules with the highest **lift**. Compare this list with the highest-confidence list. What kinds of products appear now? Look at the `support` and `transactions` columns: how much evidence is each of these rules based on?
+
+```{python}
+rules_display[
+    ["antecedent", "consequent", "support",
+     "confidence", "lift", "transactions"]
+].sort_values(
+    "lift",
+    ascending=False
+).head(10)
+```
+
+The highest-lift rules show more specific product relationships, especially combinations involving root vegetables and other vegetables, rather than mostly predicting whole milk. These rules have fairly low support, generally around 1% to 2.3%, so they are based on roughly 100 to 230 baskets. This suggests the associations may be stronger, but they are supported by fewer transactions than some of the high-confidence rules.
+
+17. Create `interesting_rules`: the rules with **confidence of at least 0.30 and lift of at least 1.5**, sorted by lift (largest first).
+
+```{python}
+interesting_rules = rules_display[
+    (rules_display["confidence"] >= 0.30) &
+    (rules_display["lift"] >= 1.5)
+].sort_values(
+    "lift",
+    ascending=False
+)
+
+interesting_rules[
+    ["antecedent", "consequent", "support",
+     "confidence", "lift", "transactions"]
+]
+```
+
+18. Choose **one** rule from the table and interpret its **support**, **confidence**, and **lift** with numbers, as you did for {yogurt} → {whole milk}.
+
+{citrus fruit, other vegetables} → {root vegetables}
+
+This rule has support of about 0.0104, meaning about 1.04% of all baskets contain citrus fruit, other vegetables, and root vegetables together. The confidence is about 0.359, meaning about 35.9% of baskets with citrus fruit and other vegetables also contain root vegetables. The lift is about 3.30, meaning these items occur together about 3.3 times more often than we would expect by chance.
+
+19. The manager wants to **increase sales of yogurt**. Which products should the store link to yogurt (shelf placement, a joint promotion, a recommendation)?
+
+```{python}
+yogurt_rules = interesting_rules[
+    interesting_rules["consequent"] == "yogurt"
+]
+
+yogurt_rules[
+    ["antecedent", "support", "confidence", "lift", "transactions"]
+].sort_values(
+    "lift",
+    ascending=False
+).head(10)
+```
+
+I would link yogurt with curd and whole milk because they show some of the strongest associations with yogurt. The rule {curd, whole milk} → {yogurt} has a lift of about 2.76, meaning yogurt is much more likely to be purchased when those products are also purchased. Tropical fruit and whipped/sour cream could also be good products to consider based on their high-lift rules.
+
+---
+## References and attribution
+
+
+- Hahsler, M., Gr&uuml;n, B., and Hornik, K. (2005). arules: A computational environment for mining association rules and frequent item sets. *Journal of Statistical Software*, 14(15). (The R package that distributes the data.)
+- Data copy: GitHub repository `stedy/Machine-Learning-with-R-datasets` (`groceries.csv`), the data used in Lantz, B., *Machine Learning with R*.
+- Raschka, S. (2018). MLxtend: Providing machine learning and data science utilities and extensions to Python's scientific computing stack. *Journal of Open Source Software*, 3(24), 638. <https://doi.org/10.21105/joss.00638>
+
+
+**Preparation of this notebook:** drafted with the assistance of generative AI tools (ChatGPT and Claude).
+
+
